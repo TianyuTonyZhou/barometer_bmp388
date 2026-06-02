@@ -1,63 +1,66 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import rospy
-import serial # dependency: pip install pyserial
-import string
-import math
 import sys
+import serial   # dependency: pip install pyserial
 
+import rclpy
+from rclpy.node import Node
 from barometer_bmp388.msg import Barometer
-from sensor_msgs.msg import Temperature
-from geometry_msgs.msg import Vector3Stamped
 
 
-rospy.init_node("barometer_node")
-baro_pub = rospy.Publisher('/barometer/raw', Barometer, queue_size=1)
+class BarometerNode(Node):
+    def __init__(self):
+        super().__init__('barometer_node')
 
-baroMsg = Barometer()
+        self.declare_parameter('port', '/dev/mega2560')
+        self.declare_parameter('baudrate', 115200)
 
-port='/dev/mega2560'
-rospy.loginfo("Opening %s...", port)
-try:
-    ser = serial.Serial(port=port, baudrate=115200, timeout=5)
-except serial.serialutil.SerialException:
-    rospy.logerr("IMU not found at port "+port + ". Did you specify the correct port in the launch file?")
-    sys.exit(0)
+        port = self.get_parameter('port').get_parameter_value().string_value
+        baud = self.get_parameter('baudrate').get_parameter_value().integer_value
 
-seq=0
+        self.publisher = self.create_publisher(Barometer, '/barometer/raw', 1)
+
+        self.get_logger().info(f'Opening {port}...')
+        try:
+            self.ser = serial.Serial(port=port, baudrate=baud, timeout=5)
+        except serial.serialutil.SerialException:
+            self.get_logger().error(
+                f'Barometer not found at port {port}. Did you specify the correct port?')
+            raise
 
 
-while not rospy.is_shutdown():
-    
-    try:
-        line = ((ser.readline()).rstrip()).decode("utf-8") # Type "bytes" to "string"
-        words = line.split(",")    # Fields split
-        if len(words) == 3:
-            #rospy.loginfo("altitude: %f, pressure: %f, temperature: %f",float(words[0]),float(words[1]),float(words[2]))
-            baroMsg.altitude = float(words[0])
-            baroMsg.pressure = float(words[1])
-            baroMsg.temperature = float(words[2])
-            baroMsg.header.stamp= rospy.Time.now()
-            baroMsg.header.frame_id = 'base_link'
-            baroMsg.header.seq = seq
-            seq = seq + 1
-            baro_pub.publish(baroMsg)
-    except:
-        continue
+        # Use a timer-driven read loop so rclpy.spin() can also handle shutdown
+        self.timer = self.create_timer(0.01, self.read_serial)
+
+    def read_serial(self):
+        try:
+            line = self.ser.readline().rstrip().decode('utf-8')
+            words = line.split(',')
+            if len(words) == 3:
+                msg = Barometer()
+                msg.altitude    = float(words[0])
+                msg.pressure    = float(words[1])
+                msg.temperature = float(words[2])
+                msg.header.stamp = self.get_clock().now().to_msg()
+                msg.header.frame_id = 'base_link'
+                # NOTE: header.seq removed in ROS 2
+                self.publisher.publish(msg)
+        except Exception:
+            return
         
-ser.close
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = BarometerNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.ser.close()
+        node.destroy_node()
+        rclpy.shutdown()
 
 
-'''
-from tf.transformations import quaternion_from_euler
-
-DEG2RAD = math.pi/180.0
-imu_yaw_calibration = 0.0
-# x points forward, y points left, z points up. Angular velocity direction right roll/head down/left is positive
-rospy.loginfo("Flushing first 1 IMU entries...")
-for i in range(1):
-    line = ser.readline()
-    print "serial from imu: " + line
-rospy.loginfo("Publishing IMU data...")
-'''
-
+if __name__ == '__main__':
+    main()
